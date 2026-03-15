@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   Trash2, Download, Image as ImageIcon, Plus, Minus, Loader2, ArrowLeft,
   Settings2, Eraser, Maximize2, Minimize2, X, Menu,
+  RotateCcw, ChevronUp, ChevronDown, Type, Layers2,
 } from 'lucide-react';
 
 declare global {
@@ -26,11 +27,30 @@ type ElementData = {
 };
 
 type CanvasElementData = ElementData & {
+  kind: 'image';
   canvasId: string;
   scale: number;
   x: number;
   y: number;
+  rotation: number; // degrees
 };
+
+type TextCanvasElement = {
+  kind: 'text';
+  canvasId: string;
+  text: string;
+  fontSize: number;
+  color: string;
+  fontFamily: string;
+  bold: boolean;
+  italic: boolean;
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+};
+
+type AnyCanvasElement = CanvasElementData | TextCanvasElement;
 
 type Toast = { id: string; message: string; type: 'error' | 'info' };
 
@@ -152,7 +172,7 @@ const ElementCard = React.memo(function ElementCard({ el, onEdit, onDragStart }:
 });
 
 type CanvasElementItemProps = {
-  el: CanvasElementData;
+  el: AnyCanvasElement;
   isSelected: boolean;
   isDragging: boolean;
   onPointerDown: (e: React.PointerEvent, canvasId: string) => void;
@@ -161,28 +181,112 @@ type CanvasElementItemProps = {
 const CanvasElementItem = React.memo(function CanvasElementItem({
   el, isSelected, isDragging, onPointerDown,
 }: CanvasElementItemProps) {
+  const w = el.kind === 'image' ? (el.originalWidth || 150) : 200;
+  const h = el.kind === 'image' ? (el.originalHeight || 150) : 60;
   return (
     <div
       id={`canvas-el-${el.canvasId}`}
       onPointerDown={(e) => onPointerDown(e, el.canvasId)}
       style={{
         position: 'absolute', top: 0, left: 0,
-        width: el.originalWidth || 150, height: el.originalHeight || 150,
-        transform: `translate(${el.x}px, ${el.y}px) scale(${el.scale})`,
+        width: w, height: h,
+        transform: `translate(${el.x}px, ${el.y}px) rotate(${el.rotation}deg) scale(${el.scale})`,
         transformOrigin: 'center', zIndex: isSelected ? 50 : 10,
         cursor: isDragging ? 'grabbing' : 'grab', touchAction: 'none',
       }}
       className={`flex items-center justify-center ${isSelected ? 'ring-2 ring-blue-500 ring-offset-2 rounded-lg bg-white/10 backdrop-blur-[2px]' : ''}`}
     >
-      <img src={el.src} alt=""
-        className={`max-w-full max-h-full object-contain pointer-events-none drop-shadow-lg ${el.isRemovingBackground ? 'opacity-50 blur-sm' : ''}`}
-        style={{ filter: `brightness(${el.brightness}%) contrast(${el.contrast}%)` }} />
-      {el.isRemovingBackground && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <Loader2 className="animate-spin text-gray-900 drop-shadow-md" size={32} />
-        </div>
+      {el.kind === 'text' ? (
+        <span
+          className="pointer-events-none select-none whitespace-nowrap drop-shadow-lg"
+          style={{
+            fontSize: el.fontSize,
+            color: el.color,
+            fontFamily: el.fontFamily,
+            fontWeight: el.bold ? 'bold' : 'normal',
+            fontStyle: el.italic ? 'italic' : 'normal',
+          }}
+        >
+          {el.text}
+        </span>
+      ) : (
+        <>
+          <img src={el.src} alt=""
+            className={`max-w-full max-h-full object-contain pointer-events-none drop-shadow-lg ${el.isRemovingBackground ? 'opacity-50 blur-sm' : ''}`}
+            style={{ filter: `brightness(${el.brightness}%) contrast(${el.contrast}%)` }} />
+          {el.isRemovingBackground && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Loader2 className="animate-spin text-gray-900 drop-shadow-md" size={32} />
+            </div>
+          )}
+        </>
       )}
     </div>
+  );
+});
+
+// ---------------------------------------------------------------------------
+// LayersPanel sub-component
+// ---------------------------------------------------------------------------
+
+type LayersPanelProps = {
+  canvasElements: AnyCanvasElement[];
+  selectedElementId: string | null;
+  onSelect: (canvasId: string) => void;
+  onMoveUp: (canvasId: string) => void;
+  onMoveDown: (canvasId: string) => void;
+  onRemove: (canvasId: string) => void;
+};
+
+const LayersPanel = React.memo(function LayersPanel({
+  canvasElements, selectedElementId, onSelect, onMoveUp, onMoveDown, onRemove,
+}: LayersPanelProps) {
+  if (canvasElements.length === 0) return null;
+  // Display in reverse order (top layer first)
+  const reversed = [...canvasElements].reverse();
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-3">
+        <Layers2 size={12} className="text-gray-400" />
+        <h2 className="text-xs font-bold tracking-widest text-gray-400 uppercase">Layers</h2>
+      </div>
+      <div className="space-y-1">
+        {reversed.map((el, reversedIdx) => {
+          const originalIdx = canvasElements.length - 1 - reversedIdx;
+          const isTop = originalIdx === canvasElements.length - 1;
+          const isBottom = originalIdx === 0;
+          return (
+            <div
+              key={el.canvasId}
+              onClick={() => onSelect(el.canvasId)}
+              className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors text-sm
+                ${selectedElementId === el.canvasId ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}`}
+            >
+              <span className="flex-1 truncate font-medium">
+                {el.kind === 'text' ? `T: ${el.text.slice(0, 12) || 'Text'}` : `Img ${originalIdx + 1}`}
+              </span>
+              <button
+                onClick={(e) => { e.stopPropagation(); onMoveUp(el.canvasId); }}
+                disabled={isTop}
+                className="p-0.5 rounded hover:bg-gray-200 disabled:opacity-20 transition-colors"
+                title="Move up"
+              ><ChevronUp size={12} /></button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onMoveDown(el.canvasId); }}
+                disabled={isBottom}
+                className="p-0.5 rounded hover:bg-gray-200 disabled:opacity-20 transition-colors"
+                title="Move down"
+              ><ChevronDown size={12} /></button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onRemove(el.canvasId); }}
+                className="p-0.5 rounded hover:bg-red-100 text-red-400 hover:text-red-600 transition-colors"
+                title="Remove"
+              ><X size={12} /></button>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 });
 
@@ -228,27 +332,38 @@ export default function Page() {
   const [isCheckingKey, setIsCheckingKey] = useState(true);
   const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
   const [elements, setElements] = useState<ElementData[]>([]);
-  const [canvasElements, setCanvasElements] = useState<CanvasElementData[]>([]);
+  const [canvasElements, setCanvasElements] = useState<AnyCanvasElement[]>([]);
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [beforeImage, setBeforeImage] = useState<string | null>(null);
+  const [comparePos, setComparePos] = useState(50); // 0-100 slider position
   const [isGenerating, setIsGenerating] = useState(false);
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [snapGuides, setSnapGuides] = useState<{ type: 'vertical' | 'horizontal'; position: number }[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  // Sidebar open state — defaults to open; on small screens it becomes an overlay.
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  // Canvas zoom level. CSS `zoom` property is used so layout reflows correctly
-  // and getBoundingClientRect() returns zoomed screen coordinates throughout.
   const [canvasZoom, setCanvasZoom] = useState(1);
+  // Export modal
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<'jpeg' | 'png'>('jpeg');
+  const [exportQuality, setExportQuality] = useState(92);
+  // Text overlay modal
+  const [showTextModal, setShowTextModal] = useState(false);
+  const [textInput, setTextInput] = useState('');
+  const [textFontSize, setTextFontSize] = useState(48);
+  const [textColor, setTextColor] = useState('#ffffff');
+  const [textFontFamily, setTextFontFamily] = useState('sans-serif');
+  const [textBold, setTextBold] = useState(false);
+  const [textItalic, setTextItalic] = useState(false);
 
   // Refs for values used in event handlers (avoids stale-closure re-registrations).
   const bgImgRef = useRef<HTMLImageElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const elementsInputRef = useRef<HTMLInputElement>(null);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
-  const canvasElementsRef = useRef<CanvasElementData[]>([]);
+  const canvasElementsRef = useRef<AnyCanvasElement[]>([]);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const rafRef = useRef<number | null>(null);
   const canvasZoomRef = useRef(1);
@@ -348,12 +463,12 @@ export default function Page() {
 
   const updateElementFilter = useCallback((id: string, type: 'brightness' | 'contrast', value: number) => {
     setElements(prev => prev.map(el => el.id === id ? { ...el, [type]: value } : el));
-    setCanvasElements(prev => prev.map(el => el.id === id ? { ...el, [type]: value } : el));
+    setCanvasElements(prev => prev.map(el => el.kind === 'image' && el.id === id ? { ...el, [type]: value } : el));
   }, []);
 
   const deleteElement = useCallback((id: string) => {
     setElements(prev => prev.filter(el => el.id !== id));
-    setCanvasElements(prev => prev.filter(el => el.id !== id));
+    setCanvasElements(prev => prev.filter(el => el.kind !== 'image' || el.id !== id));
     setEditingElementId(prev => prev === id ? null : prev);
   }, []);
 
@@ -368,7 +483,7 @@ export default function Page() {
       );
       const processedImageUrl = await removeMagentaBackground(magentaImageUrl);
       setElements(prev => prev.map(e => e.id === id ? { ...e, src: processedImageUrl, isRemovingBackground: false } : e));
-      setCanvasElements(prev => prev.map(e => e.id === id ? { ...e, src: processedImageUrl } : e));
+      setCanvasElements(prev => prev.map(e => e.kind === 'image' && e.id === id ? { ...e, src: processedImageUrl } : e));
     } catch (err) {
       console.error('Failed to remove background:', err);
       addToast('Failed to remove background. Please try again.');
@@ -390,7 +505,7 @@ export default function Page() {
       ? Math.min(150 / element.originalWidth, 150 / element.originalHeight, 1) : 1;
     const w = element.originalWidth || 150;
     const h = element.originalHeight || 150;
-    const newEl: CanvasElementData = { ...element, canvasId: crypto.randomUUID(), scale: initialScale, x: x - w / 2, y: y - h / 2 };
+    const newEl: CanvasElementData = { ...element, kind: 'image', canvasId: crypto.randomUUID(), scale: initialScale, x: x - w / 2, y: y - h / 2, rotation: 0 };
     setCanvasElements(prev => [...prev, newEl]);
     setSelectedElementId(newEl.canvasId);
   }, [elements]);
@@ -406,6 +521,52 @@ export default function Page() {
   const updateScale = useCallback((canvasId: string, scale: number) => {
     setCanvasElements(prev => prev.map(el => el.canvasId === canvasId ? { ...el, scale } : el));
   }, []);
+
+  const updateRotation = useCallback((canvasId: string, rotation: number) => {
+    setCanvasElements(prev => prev.map(el => el.canvasId === canvasId ? { ...el, rotation } : el));
+  }, []);
+
+  const moveLayerUp = useCallback((canvasId: string) => {
+    setCanvasElements(prev => {
+      const idx = prev.findIndex(e => e.canvasId === canvasId);
+      if (idx < 0 || idx === prev.length - 1) return prev;
+      const next = [...prev];
+      [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+      return next;
+    });
+  }, []);
+
+  const moveLayerDown = useCallback((canvasId: string) => {
+    setCanvasElements(prev => {
+      const idx = prev.findIndex(e => e.canvasId === canvasId);
+      if (idx <= 0) return prev;
+      const next = [...prev];
+      [next[idx], next[idx - 1]] = [next[idx - 1], next[idx]];
+      return next;
+    });
+  }, []);
+
+  const addTextElement = useCallback(() => {
+    if (!textInput.trim()) return;
+    const newEl: TextCanvasElement = {
+      kind: 'text',
+      canvasId: crypto.randomUUID(),
+      text: textInput.trim(),
+      fontSize: textFontSize,
+      color: textColor,
+      fontFamily: textFontFamily,
+      bold: textBold,
+      italic: textItalic,
+      x: 50,
+      y: 50,
+      scale: 1,
+      rotation: 0,
+    };
+    setCanvasElements(prev => [...prev, newEl]);
+    setSelectedElementId(newEl.canvasId);
+    setShowTextModal(false);
+    setTextInput('');
+  }, [textInput, textFontSize, textColor, textFontFamily, textBold, textItalic]);
 
   const removeCanvasElement = useCallback((canvasId: string) => {
     setCanvasElements(prev => prev.filter(el => el.canvasId !== canvasId));
@@ -479,8 +640,8 @@ export default function Page() {
         setSnapGuides(guides);
 
         const dragged = canvasElementsRef.current.find(e => e.canvasId === draggingId);
-        const baseW = dragged?.originalWidth || 150;
-        const baseH = dragged?.originalHeight || 150;
+        const baseW = (dragged?.kind === 'image' ? dragged.originalWidth : undefined) || 150;
+        const baseH = (dragged?.kind === 'image' ? dragged.originalHeight : undefined) || 150;
         // Convert screen px → CSS px (the coordinate space of el.x/y), accounting for zoom.
         const zoom = canvasZoomRef.current;
         const unscaledX = newScaledX / zoom - (baseW - width / zoom) / 2;
@@ -560,11 +721,18 @@ export default function Page() {
       if (selId && !editId) {
         if (e.key === '[') {
           e.preventDefault();
-          const el = canvasElementsRef.current.find(el => el.canvasId === selId);
-          if (el) setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, scale: Math.max(0.1, +(c.scale - 0.05).toFixed(2)) } : c));
+          setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, scale: Math.max(0.1, +(c.scale - 0.05).toFixed(2)) } : c));
         } else if (e.key === ']') {
           e.preventDefault();
           setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, scale: Math.min(2, +(c.scale + 0.05).toFixed(2)) } : c));
+        } else if (e.key === ',') {
+          // Rotate CCW by 5°
+          e.preventDefault();
+          setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, rotation: (c.rotation - 5 + 360) % 360 } : c));
+        } else if (e.key === '.') {
+          // Rotate CW by 5°
+          e.preventDefault();
+          setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, rotation: (c.rotation + 5) % 360 } : c));
         }
       }
 
@@ -585,7 +753,7 @@ export default function Page() {
 
   const removeBackground = useCallback(async (canvasId: string) => {
     const el = canvasElementsRef.current.find(e => e.canvasId === canvasId);
-    if (!el) return;
+    if (!el || el.kind !== 'image') return;
     setCanvasElements(prev => prev.map(e => e.canvasId === canvasId ? { ...e, isRemovingBackground: true } : e));
     try {
       const { data: base64Data, mimeType } = parseDataUrl(el.src);
@@ -603,7 +771,9 @@ export default function Page() {
   const generateComposite = useCallback(async () => {
     if (!bgImgRef.current) return;
     setIsGenerating(true);
+    setComparePos(50);
     try {
+      const zoom = canvasZoomRef.current;
       const bgRect = bgImgRef.current.getBoundingClientRect();
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
@@ -612,20 +782,47 @@ export default function Page() {
       const naturalHeight = bgImgRef.current.naturalHeight;
       canvas.width = naturalWidth;
       canvas.height = naturalHeight;
-      const scaleX = naturalWidth / bgRect.width;
-      const scaleY = naturalHeight / bgRect.height;
+      // bgRect.width is in screen px (includes CSS zoom); divide by zoom to get CSS px
+      const scaleX = naturalWidth / (bgRect.width / zoom);
+      const scaleY = naturalHeight / (bgRect.height / zoom);
       ctx.drawImage(bgImgRef.current, 0, 0, naturalWidth, naturalHeight);
       for (const el of canvasElementsRef.current) {
         const elNode = document.getElementById(`canvas-el-${el.canvasId}`);
-        const imgNode = elNode?.querySelector('img');
-        if (!imgNode) continue;
-        const elRect = imgNode.getBoundingClientRect();
         ctx.save();
-        ctx.filter = `brightness(${el.brightness}%) contrast(${el.contrast}%)`;
-        ctx.drawImage(imgNode, (elRect.left - bgRect.left) * scaleX, (elRect.top - bgRect.top) * scaleY, elRect.width * scaleX, elRect.height * scaleY);
+        if (el.kind === 'image') {
+          const imgNode = elNode?.querySelector('img') as HTMLImageElement | null;
+          if (!imgNode) { ctx.restore(); continue; }
+          const elRect = imgNode.getBoundingClientRect();
+          // Center of element in natural-image coordinates
+          const cx = ((elRect.left + elRect.width / 2 - bgRect.left) / zoom) * scaleX;
+          const cy = ((elRect.top + elRect.height / 2 - bgRect.top) / zoom) * scaleY;
+          const naturalW = (elRect.width / zoom) * scaleX;
+          const naturalH = (elRect.height / zoom) * scaleY;
+          ctx.translate(cx, cy);
+          ctx.rotate((el.rotation * Math.PI) / 180);
+          ctx.filter = `brightness(${el.brightness}%) contrast(${el.contrast}%)`;
+          ctx.drawImage(imgNode, -naturalW / 2, -naturalH / 2, naturalW, naturalH);
+        } else {
+          // Text element
+          const spanNode = elNode?.querySelector('span') as HTMLElement | null;
+          if (!spanNode) { ctx.restore(); continue; }
+          const spanRect = spanNode.getBoundingClientRect();
+          const cx = ((spanRect.left + spanRect.width / 2 - bgRect.left) / zoom) * scaleX;
+          const cy = ((spanRect.top + spanRect.height / 2 - bgRect.top) / zoom) * scaleY;
+          ctx.translate(cx, cy);
+          ctx.rotate((el.rotation * Math.PI) / 180);
+          const scaledFontSize = el.fontSize * el.scale * scaleX;
+          ctx.font = `${el.italic ? 'italic ' : ''}${el.bold ? 'bold ' : ''}${scaledFontSize}px ${el.fontFamily}`;
+          ctx.fillStyle = el.color;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(el.text, 0, 0);
+        }
         ctx.restore();
       }
-      const { data: base64Data } = parseDataUrl(canvas.toDataURL('image/jpeg', 0.9));
+      const beforeDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      setBeforeImage(beforeDataUrl);
+      const { data: base64Data } = parseDataUrl(beforeDataUrl);
       const newImageUrl = await callGemini(base64Data, 'image/jpeg',
         'This image contains a background and several elements overlaid on top of it. Please blend the overlaid elements naturally into the background. CRITICAL INSTRUCTIONS: 1. DO NOT change the original background image in any way (do not turn on lights, do not change the time of day, do not alter the room). 2. DO NOT change the appearance, color, or texture of the elements being added. 3. DO NOT project shadows or light patterns onto the elements (e.g., do not add window shadows across the sofa). 4. Only add subtle contact shadows underneath or behind the elements to ground them in the scene. 5. The final image must look exactly like the layout image, but with realistic contact shadows.',
       );
@@ -638,13 +835,38 @@ export default function Page() {
     }
   }, [addToast]);
 
-  const downloadImage = useCallback(() => {
+  const downloadImage = useCallback((fmt?: 'jpeg' | 'png', quality?: number) => {
     if (!generatedImage) return;
-    const a = document.createElement('a');
-    a.href = generatedImage;
-    a.download = 'blended-image.jpg';
-    a.click();
-  }, [generatedImage]);
+    const format = fmt ?? exportFormat;
+    const q = (quality ?? exportQuality) / 100;
+    if (format === 'jpeg') {
+      // Re-encode at requested quality
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        c.getContext('2d')!.drawImage(img, 0, 0);
+        const a = document.createElement('a');
+        a.href = c.toDataURL('image/jpeg', q);
+        a.download = 'blended-image.jpg';
+        a.click();
+      };
+      img.src = generatedImage;
+    } else {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        c.getContext('2d')!.drawImage(img, 0, 0);
+        const a = document.createElement('a');
+        a.href = c.toDataURL('image/png');
+        a.download = 'blended-image.png';
+        a.click();
+      };
+      img.src = generatedImage;
+    }
+    setShowExportModal(false);
+  }, [generatedImage, exportFormat, exportQuality]);
 
   const handleEditElement = useCallback((id: string) => setEditingElementId(id), []);
   const handleDragStart = useCallback((e: React.DragEvent, id: string) => {
@@ -657,7 +879,7 @@ export default function Page() {
   );
 
   const selectedCanvasEl = useMemo(
-    () => canvasElements.find(e => e.canvasId === selectedElementId),
+    () => canvasElements.find(e => e.canvasId === selectedElementId) ?? null,
     [canvasElements, selectedElementId],
   );
 
@@ -773,12 +995,39 @@ export default function Page() {
             )}
           </section>
 
+          {/* Text overlay */}
+          <section>
+            <div className="flex items-center gap-2 mb-3">
+              <Type size={12} className="text-gray-400" />
+              <h2 className="text-xs font-bold tracking-widest text-gray-400 uppercase">Text</h2>
+            </div>
+            <button
+              onClick={() => setShowTextModal(true)}
+              className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-gray-300 hover:border-gray-400 hover:bg-gray-50 transition-colors rounded-xl py-2.5 text-sm font-medium text-gray-500"
+            >
+              <Type size={14} /> Add Text Overlay
+            </button>
+          </section>
+
+          {/* Layer reordering */}
+          {canvasElements.length > 0 && (
+            <LayersPanel
+              canvasElements={canvasElements}
+              selectedElementId={selectedElementId}
+              onSelect={setSelectedElementId}
+              onMoveUp={moveLayerUp}
+              onMoveDown={moveLayerDown}
+              onRemove={removeCanvasElement}
+            />
+          )}
+
           {/* Keyboard shortcuts hint */}
           <section className="pb-2">
             <h2 className="text-xs font-bold tracking-widest text-gray-400 uppercase mb-2">Shortcuts</h2>
             <dl className="text-xs text-gray-400 space-y-1">
               {[
                 ['[ ]', 'Scale element'],
+                [', .', 'Rotate element'],
                 ['Del', 'Remove element'],
                 ['Esc', 'Deselect'],
                 ['Ctrl+scroll', 'Zoom canvas'],
@@ -819,18 +1068,63 @@ export default function Page() {
         ) : generatedImage ? (
           <div className="flex-1 flex flex-col p-8 overflow-y-auto">
             <div className="flex items-center justify-between mb-6 shrink-0">
-              <button onClick={() => setGeneratedImage(null)} className="flex items-center gap-2 text-gray-600 hover:text-gray-900 font-medium transition-colors">
+              <button onClick={() => { setGeneratedImage(null); setBeforeImage(null); }} className="flex items-center gap-2 text-gray-600 hover:text-gray-900 font-medium transition-colors">
                 <ArrowLeft size={20} /> Back to Edit
               </button>
               <div className="flex items-center gap-3">
                 <button onClick={() => setIsFullscreen(true)} className="flex items-center gap-2 bg-white text-gray-900 border border-gray-200 px-4 py-2.5 rounded-full font-medium hover:bg-gray-50 transition-colors shadow-sm">
                   <Maximize2 size={18} /> View Full
                 </button>
-                <button onClick={downloadImage} className="flex items-center gap-2 bg-gray-900 text-white px-5 py-2.5 rounded-full font-medium hover:bg-gray-800 transition-colors shadow-md">
-                  <Download size={18} /> Download Image
+                <button onClick={() => setShowExportModal(true)} className="flex items-center gap-2 bg-gray-900 text-white px-5 py-2.5 rounded-full font-medium hover:bg-gray-800 transition-colors shadow-md">
+                  <Download size={18} /> Download
                 </button>
               </div>
             </div>
+
+            {/* Before/After comparison slider */}
+            {beforeImage && (
+              <div className="mb-4 shrink-0">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Before / After</span>
+                  <span className="text-xs text-gray-400">{comparePos}%</span>
+                </div>
+                <div
+                  className="relative w-full rounded-xl overflow-hidden select-none bg-gray-100"
+                  style={{ aspectRatio: '16/9', maxHeight: '50vh' }}
+                  onPointerMove={(e) => {
+                    if (e.buttons !== 1) return;
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setComparePos(Math.round(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100))));
+                  }}
+                  onPointerDown={(e) => {
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setComparePos(Math.round(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100))));
+                  }}
+                >
+                  <img src={generatedImage} alt="After" className="absolute inset-0 w-full h-full object-contain" />
+                  <div
+                    className="absolute inset-0 overflow-hidden"
+                    style={{ clipPath: `inset(0 ${100 - comparePos}% 0 0)` }}
+                  >
+                    <img src={beforeImage} alt="Before" className="absolute inset-0 w-full h-full object-contain" />
+                  </div>
+                  {/* Divider */}
+                  <div
+                    className="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg pointer-events-none"
+                    style={{ left: `${comparePos}%` }}
+                  >
+                    <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-white shadow-md flex items-center justify-center">
+                      <div className="w-3 h-3 rounded-full bg-gray-400" />
+                    </div>
+                  </div>
+                  {/* Labels */}
+                  <span className="absolute top-2 left-3 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">BEFORE</span>
+                  <span className="absolute top-2 right-3 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">AFTER</span>
+                </div>
+              </div>
+            )}
+
             <div className="flex-1 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex items-center justify-center p-4 min-h-0">
               <img src={generatedImage} alt="Generated" className="max-w-full max-h-full object-contain rounded-lg" />
             </div>
@@ -906,38 +1200,62 @@ export default function Page() {
 
             {/* Floating toolbar for selected element */}
             {selectedElementId && selectedCanvasEl && (
-              <div className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md rounded-full shadow-xl px-6 py-3 flex items-center gap-4 z-50 border border-gray-200">
-                <span className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Scale</span>
+              <div className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md rounded-2xl shadow-xl px-5 py-3 flex items-center gap-3 z-50 border border-gray-200 flex-wrap justify-center max-w-[96vw]">
+                {/* Scale */}
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Scale</span>
                 <input
                   type="range" min="0.1" max="2" step="0.01"
                   value={selectedCanvasEl.scale}
                   onChange={(e) => updateScale(selectedElementId, parseFloat(e.target.value))}
-                  className="w-24 accent-gray-900"
+                  className="w-20 accent-gray-900"
                 />
-                <span className="text-sm font-medium text-gray-600 w-12 text-right tabular-nums">
+                <span className="text-xs font-medium text-gray-600 w-10 text-right tabular-nums">
                   {Math.round(selectedCanvasEl.scale * 100)}%
                 </span>
                 <button
                   onClick={() => updateScale(selectedElementId, 1)}
-                  className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-xs font-bold rounded-md transition-colors text-gray-700"
-                >
-                  100%
-                </button>
-                <div className="w-px h-6 bg-gray-200" />
+                  className="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-xs font-bold rounded transition-colors text-gray-700"
+                >1:1</button>
+
+                <div className="w-px h-5 bg-gray-200" />
+
+                {/* Rotation */}
+                <RotateCcw size={14} className="text-gray-500" />
+                <input
+                  type="range" min="0" max="359" step="1"
+                  value={selectedCanvasEl.rotation}
+                  onChange={(e) => updateRotation(selectedElementId, parseInt(e.target.value))}
+                  className="w-20 accent-gray-900"
+                />
+                <span className="text-xs font-medium text-gray-600 w-8 text-right tabular-nums">
+                  {Math.round(selectedCanvasEl.rotation)}°
+                </span>
                 <button
-                  onClick={() => removeBackground(selectedElementId)}
-                  disabled={selectedCanvasEl.isRemovingBackground}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-900 transition-colors disabled:opacity-50"
-                >
-                  <Eraser size={16} /> Remove BG
-                </button>
-                <div className="w-px h-6 bg-gray-200" />
+                  onClick={() => updateRotation(selectedElementId, 0)}
+                  className="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-xs font-bold rounded transition-colors text-gray-700"
+                >0°</button>
+
+                <div className="w-px h-5 bg-gray-200" />
+
+                {selectedCanvasEl.kind === 'image' && (
+                  <>
+                    <button
+                      onClick={() => removeBackground(selectedElementId)}
+                      disabled={selectedCanvasEl.isRemovingBackground}
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
+                    >
+                      <Eraser size={14} /> Remove BG
+                    </button>
+                    <div className="w-px h-5 bg-gray-200" />
+                  </>
+                )}
+
                 <button
                   onClick={() => removeCanvasElement(selectedElementId)}
-                  className="text-red-500 hover:text-red-600 hover:bg-red-50 p-2 rounded-full transition-colors"
+                  className="text-red-500 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-full transition-colors"
                   title="Remove element (Del)"
                 >
-                  <Trash2 size={18} />
+                  <Trash2 size={16} />
                 </button>
               </div>
             )}
@@ -1036,6 +1354,133 @@ export default function Page() {
             <Minimize2 size={24} />
           </button>
           <img src={generatedImage} alt="Generated Fullscreen" className="max-w-full max-h-full object-contain" />
+        </div>
+      )}
+
+      {/* ── Export Modal ─────────────────────────────────────────────────── */}
+      {showExportModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-gray-100">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-lg font-bold tracking-tight">Export Image</h3>
+              <button onClick={() => setShowExportModal(false)} className="text-gray-400 hover:text-gray-900 p-1 transition-colors"><X size={20} /></button>
+            </div>
+            <div className="space-y-5">
+              <div>
+                <label className="text-sm font-semibold text-gray-700 mb-2 block">Format</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['jpeg', 'png'] as const).map(fmt => (
+                    <button
+                      key={fmt}
+                      onClick={() => setExportFormat(fmt)}
+                      className={`py-2.5 rounded-xl text-sm font-semibold border transition-colors ${exportFormat === fmt ? 'bg-gray-900 text-white border-gray-900' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'}`}
+                    >
+                      {fmt.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {exportFormat === 'jpeg' && (
+                <div>
+                  <div className="flex justify-between mb-2">
+                    <label className="text-sm font-semibold text-gray-700">Quality</label>
+                    <span className="text-sm text-gray-500">{exportQuality}%</span>
+                  </div>
+                  <input type="range" min="10" max="100" step="1"
+                    value={exportQuality}
+                    onChange={(e) => setExportQuality(parseInt(e.target.value))}
+                    className="w-full accent-gray-900" />
+                  <div className="flex justify-between text-xs text-gray-400 mt-1">
+                    <span>Smaller file</span><span>Best quality</span>
+                  </div>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => downloadImage(exportFormat, exportQuality)}
+              className="mt-6 w-full bg-gray-900 text-white py-3 rounded-xl font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"
+            >
+              <Download size={18} /> Download {exportFormat.toUpperCase()}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Text Overlay Modal ───────────────────────────────────────────── */}
+      {showTextModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-gray-100">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-lg font-bold tracking-tight">Add Text</h3>
+              <button onClick={() => setShowTextModal(false)} className="text-gray-400 hover:text-gray-900 p-1 transition-colors"><X size={20} /></button>
+            </div>
+            <div className="space-y-4">
+              {/* Preview */}
+              <div className="h-20 bg-gray-900 rounded-xl flex items-center justify-center overflow-hidden px-4">
+                <span style={{
+                  fontSize: Math.min(textFontSize, 40),
+                  color: textColor,
+                  fontFamily: textFontFamily,
+                  fontWeight: textBold ? 'bold' : 'normal',
+                  fontStyle: textItalic ? 'italic' : 'normal',
+                }} className="truncate max-w-full select-none">
+                  {textInput || 'Preview text'}
+                </span>
+              </div>
+              <input
+                type="text"
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                placeholder="Enter text..."
+                className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
+                autoFocus
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 mb-1 block">Font Size</label>
+                  <input type="number" min="8" max="300" value={textFontSize}
+                    onChange={(e) => setTextFontSize(parseInt(e.target.value) || 48)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900" />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 mb-1 block">Color</label>
+                  <input type="color" value={textColor}
+                    onChange={(e) => setTextColor(e.target.value)}
+                    className="w-full h-10 border border-gray-200 rounded-lg px-1 py-1 cursor-pointer" />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Font</label>
+                <select value={textFontFamily} onChange={(e) => setTextFontFamily(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900">
+                  <option value="sans-serif">Sans-serif</option>
+                  <option value="serif">Serif</option>
+                  <option value="monospace">Monospace</option>
+                  <option value="cursive">Cursive</option>
+                  <option value="fantasy">Fantasy</option>
+                  <option value="Georgia, serif">Georgia</option>
+                  <option value="'Arial Black', sans-serif">Arial Black</option>
+                </select>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setTextBold(b => !b)}
+                  className={`flex-1 py-2 rounded-xl text-sm font-bold border transition-colors ${textBold ? 'bg-gray-900 text-white border-gray-900' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'}`}
+                >B</button>
+                <button
+                  onClick={() => setTextItalic(i => !i)}
+                  className={`flex-1 py-2 rounded-xl text-sm italic border transition-colors ${textItalic ? 'bg-gray-900 text-white border-gray-900' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'}`}
+                >I</button>
+              </div>
+            </div>
+            <button
+              onClick={addTextElement}
+              disabled={!textInput.trim()}
+              className="mt-5 w-full bg-gray-900 text-white py-3 rounded-xl font-medium hover:bg-gray-800 transition-colors disabled:opacity-40"
+            >
+              Add to Canvas
+            </button>
+          </div>
         </div>
       )}
     </div>
