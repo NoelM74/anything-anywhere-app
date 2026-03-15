@@ -2,8 +2,8 @@ import type {Metadata} from 'next';
 import './globals.css'; // Global styles
 
 export const metadata: Metadata = {
-  title: 'My Google AI Studio App',
-  description: 'My Google AI Studio App',
+  title: 'Anything Anywhere 3D',
+  description: 'AI-powered image composition tool — place anything anywhere with Gemini.',
 };
 
 export default function RootLayout({children}: {children: React.ReactNode}) {

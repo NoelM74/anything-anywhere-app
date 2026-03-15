@@ -1,9 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Trash2, Download, Image as ImageIcon, Plus, Loader2, ArrowLeft, Move, Settings2, Eraser, Maximize2, Minimize2, X } from 'lucide-react';
-import { GoogleGenAI } from '@google/genai';
-
+import { Trash2, Download, Image as ImageIcon, Plus, Loader2, ArrowLeft, Settings2, Eraser, Maximize2, Minimize2, X } from 'lucide-react';
 declare global {
   interface Window {
     aistudio?: {
@@ -28,7 +26,6 @@ type CanvasElementData = ElementData & {
   scale: number;
   x: number;
   y: number;
-  isRemovingBackground?: boolean;
 };
 
 export default function Page() {
@@ -47,6 +44,7 @@ export default function Page() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [snapGuides, setSnapGuides] = useState<{ type: 'vertical' | 'horizontal', position: number }[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const bgImgRef = useRef<HTMLImageElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -75,6 +73,10 @@ export default function Page() {
   const handleBackgroundUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (file.size > 10 * 1024 * 1024) {
+        setError('Background image must be smaller than 10MB.');
+        return;
+      }
       const reader = new FileReader();
       reader.onload = (e) => setBackgroundImage(e.target?.result as string);
       reader.readAsDataURL(file);
@@ -83,8 +85,24 @@ export default function Page() {
 
   const handleElementsUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    
-    files.forEach(file => {
+    const currentCount = elements.length;
+
+    if (currentCount >= 10) {
+      setError('Maximum of 10 elements reached.');
+      return;
+    }
+
+    const availableSlots = 10 - currentCount;
+    const filesToProcess = files.slice(0, availableSlots);
+    if (files.length > availableSlots) {
+      setError(`Only ${availableSlots} more element(s) can be added. Some files were skipped.`);
+    }
+
+    filesToProcess.forEach(file => {
+      if (file.size > 10 * 1024 * 1024) {
+        setError(`"${file.name}" is too large. Images must be under 10MB.`);
+        return;
+      }
       const reader = new FileReader();
       reader.onload = (e) => {
         const src = e.target?.result as string;
@@ -92,7 +110,7 @@ export default function Page() {
         img.onload = () => {
           setElements(prev => {
             const newEl: ElementData = { 
-              id: Math.random().toString(36).substring(7), 
+              id: crypto.randomUUID(),
               src: src,
               brightness: 100,
               contrast: 100,
@@ -119,6 +137,25 @@ export default function Page() {
     if (editingElementId === id) setEditingElementId(null);
   };
 
+  const parseDataUrl = (src: string) => ({
+    data: src.split(',')[1],
+    mimeType: src.split(';')[0].split(':')[1],
+  });
+
+  const callGemini = async (imageData: string, mimeType: string, prompt: string): Promise<string> => {
+    const res = await fetch('/api/gemini', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageData, mimeType, prompt }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || 'Gemini API request failed');
+    }
+    const { imageData: data, mimeType: mime } = await res.json();
+    return `data:${mime};base64,${data}`;
+  };
+
   const removeElementBackground = async (id: string) => {
     const el = elements.find(e => e.id === id);
     if (!el) return;
@@ -126,35 +163,12 @@ export default function Page() {
     setElements(prev => prev.map(e => e.id === id ? { ...e, isRemovingBackground: true } : e));
 
     try {
-      const base64Data = el.src.split(',')[1];
-      const mimeType = el.src.split(';')[0].split(':')[1];
-
-      const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
-      
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: base64Data,
-                mimeType: mimeType,
-              },
-            },
-            {
-              text: 'Extract the main subject of the image and place it on a pure, solid magenta background (Hex: #FF00FF). CRITICAL: DO NOT use a checkerboard or grid pattern. The background must be completely solid magenta.',
-            },
-          ],
-        },
-      });
-
-      let newImageUrl = null;
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData) {
-          newImageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-          break;
-        }
-      }
+      const { data: base64Data, mimeType } = parseDataUrl(el.src);
+      const newImageUrl = await callGemini(
+        base64Data,
+        mimeType,
+        'Extract the main subject of the image and place it on a pure, solid magenta background (Hex: #FF00FF). CRITICAL: DO NOT use a checkerboard or grid pattern. The background must be completely solid magenta.',
+      );
 
       if (newImageUrl) {
         // Process the image to remove the magenta background
@@ -228,12 +242,10 @@ export default function Page() {
 
         setElements(prev => prev.map(e => e.id === id ? { ...e, src: processedImageUrl, isRemovingBackground: false } : e));
         setCanvasElements(prev => prev.map(e => e.id === id ? { ...e, src: processedImageUrl } : e));
-      } else {
-        throw new Error("No image returned");
       }
     } catch (error) {
       console.error("Failed to remove background:", error);
-      alert("Failed to remove background. Please try again.");
+      setError("Failed to remove background. Please try again.");
       setElements(prev => prev.map(e => e.id === id ? { ...e, isRemovingBackground: false } : e));
     }
   };
@@ -256,7 +268,7 @@ export default function Page() {
 
       const newCanvasElement: CanvasElementData = {
         ...element,
-        canvasId: Math.random().toString(36).substring(7),
+        canvasId: crypto.randomUUID(),
         scale: initialScale,
         x: x - (w / 2),
         y: y - (h / 2),
@@ -390,44 +402,16 @@ export default function Page() {
     setCanvasElements(prev => prev.map(e => e.canvasId === canvasId ? { ...e, isRemovingBackground: true } : e));
 
     try {
-      const base64Data = el.src.split(',')[1];
-      const mimeType = el.src.split(';')[0].split(':')[1];
-
-      const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
-      
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: base64Data,
-                mimeType: mimeType,
-              },
-            },
-            {
-              text: 'Extract the main subject of the image and remove the background. Output the result as a PNG image with a TRUE transparent background (alpha channel = 0). CRITICAL: DO NOT output a checkerboard or grid pattern. The background must be completely clear and transparent.',
-            },
-          ],
-        },
-      });
-
-      let newImageUrl = null;
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData) {
-          newImageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-          break;
-        }
-      }
-
-      if (newImageUrl) {
-        setCanvasElements(prev => prev.map(e => e.canvasId === canvasId ? { ...e, src: newImageUrl, isRemovingBackground: false } : e));
-      } else {
-        throw new Error("No image returned");
-      }
+      const { data: base64Data, mimeType } = parseDataUrl(el.src);
+      const newImageUrl = await callGemini(
+        base64Data,
+        mimeType,
+        'Extract the main subject of the image and remove the background. Output the result as a PNG image with a TRUE transparent background (alpha channel = 0). CRITICAL: DO NOT output a checkerboard or grid pattern. The background must be completely clear and transparent.',
+      );
+      setCanvasElements(prev => prev.map(e => e.canvasId === canvasId ? { ...e, src: newImageUrl, isRemovingBackground: false } : e));
     } catch (error) {
       console.error("Failed to remove background:", error);
-      alert("Failed to remove background. Please try again.");
+      setError("Failed to remove background. Please try again.");
       setCanvasElements(prev => prev.map(e => e.canvasId === canvasId ? { ...e, isRemovingBackground: false } : e));
     }
   };
@@ -474,44 +458,18 @@ export default function Page() {
       }
 
       const base64DataUrl = canvas.toDataURL('image/jpeg', 0.9);
-      const base64Data = base64DataUrl.split(',')[1];
+      const { data: base64Data } = parseDataUrl(base64DataUrl);
 
-      const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
-      
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: base64Data,
-                mimeType: 'image/jpeg',
-              },
-            },
-            {
-              text: 'This image contains a background and several elements overlaid on top of it. Please blend the overlaid elements naturally into the background. CRITICAL INSTRUCTIONS: 1. DO NOT change the original background image in any way (do not turn on lights, do not change the time of day, do not alter the room). 2. DO NOT change the appearance, color, or texture of the elements being added. 3. DO NOT project shadows or light patterns onto the elements (e.g., do not add window shadows across the sofa). 4. Only add subtle contact shadows underneath or behind the elements to ground them in the scene. 5. The final image must look exactly like the layout image, but with realistic contact shadows.',
-            },
-          ],
-        },
-      });
-
-      let newImageUrl = null;
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData) {
-          newImageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-          break;
-        }
-      }
-
-      if (newImageUrl) {
-        setGeneratedImage(newImageUrl);
-      } else {
-        throw new Error("No image returned from Gemini");
-      }
+      const newImageUrl = await callGemini(
+        base64Data,
+        'image/jpeg',
+        'This image contains a background and several elements overlaid on top of it. Please blend the overlaid elements naturally into the background. CRITICAL INSTRUCTIONS: 1. DO NOT change the original background image in any way (do not turn on lights, do not change the time of day, do not alter the room). 2. DO NOT change the appearance, color, or texture of the elements being added. 3. DO NOT project shadows or light patterns onto the elements (e.g., do not add window shadows across the sofa). 4. Only add subtle contact shadows underneath or behind the elements to ground them in the scene. 5. The final image must look exactly like the layout image, but with realistic contact shadows.',
+      );
+      setGeneratedImage(newImageUrl);
 
     } catch (error) {
       console.error("Generation failed:", error);
-      alert("Failed to generate image. Please try again.");
+      setError("Failed to generate image. Please try again.");
     } finally {
       setIsGenerating(false);
     }
@@ -670,6 +628,15 @@ export default function Page() {
 
       {/* Main Area */}
       <div className="flex-1 relative flex flex-col overflow-hidden">
+        {/* Error Banner */}
+        {error && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl shadow-lg flex items-center gap-3 max-w-sm w-full">
+            <span className="text-sm font-medium flex-1">{error}</span>
+            <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600 shrink-0">
+              <X size={16} />
+            </button>
+          </div>
+        )}
         {isGenerating ? (
           <div className="flex-1 flex flex-col items-center justify-center bg-white/50 backdrop-blur-sm z-50">
             <Loader2 size={48} className="animate-spin text-blue-600 mb-4" />
