@@ -18,6 +18,8 @@ type ElementData = {
   src: string;
   brightness: number;
   contrast: number;
+  originalWidth?: number;
+  originalHeight?: number;
   isRemovingBackground?: boolean;
 };
 
@@ -81,22 +83,26 @@ export default function Page() {
 
   const handleElementsUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const newElements: ElementData[] = [];
-    let loadedCount = 0;
     
     files.forEach(file => {
       const reader = new FileReader();
       reader.onload = (e) => {
-        newElements.push({ 
-          id: Math.random().toString(36).substring(7), 
-          src: e.target?.result as string,
-          brightness: 100,
-          contrast: 100
-        });
-        loadedCount++;
-        if (loadedCount === files.length) {
-          setElements(prev => [...prev, ...newElements].slice(0, 10));
-        }
+        const src = e.target?.result as string;
+        const img = new Image();
+        img.onload = () => {
+          setElements(prev => {
+            const newEl: ElementData = { 
+              id: Math.random().toString(36).substring(7), 
+              src: src,
+              brightness: 100,
+              contrast: 100,
+              originalWidth: img.naturalWidth,
+              originalHeight: img.naturalHeight
+            };
+            return [...prev, newEl].slice(0, 10);
+          });
+        };
+        img.src = src;
       };
       reader.readAsDataURL(file);
     });
@@ -126,7 +132,7 @@ export default function Page() {
       const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
       
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image-preview',
+        model: 'gemini-2.5-flash-image',
         contents: {
           parts: [
             {
@@ -241,12 +247,19 @@ export default function Page() {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       
+      const initialScale = element.originalWidth && element.originalHeight 
+        ? Math.min(150 / element.originalWidth, 150 / element.originalHeight, 1)
+        : 1;
+
+      const w = element.originalWidth || 150;
+      const h = element.originalHeight || 150;
+
       const newCanvasElement: CanvasElementData = {
         ...element,
         canvasId: Math.random().toString(36).substring(7),
-        scale: 1,
-        x: x - 75,
-        y: y - 75,
+        scale: initialScale,
+        x: x - (w / 2),
+        y: y - (h / 2),
       };
       
       setCanvasElements(prev => [...prev, newCanvasElement]);
@@ -342,8 +355,12 @@ export default function Page() {
       
       setSnapGuides(guides);
       
-      const unscaledX = newScaledX - (150 - width) / 2;
-      const unscaledY = newScaledY - (150 - height) / 2;
+      const el = canvasElements.find(e => e.canvasId === draggingId);
+      const baseW = el?.originalWidth || 150;
+      const baseH = el?.originalHeight || 150;
+      
+      const unscaledX = newScaledX - (baseW - width) / 2;
+      const unscaledY = newScaledY - (baseH - height) / 2;
       
       setCanvasElements(prev => prev.map(el => 
         el.canvasId === draggingId ? { ...el, x: unscaledX, y: unscaledY } : el
@@ -379,7 +396,7 @@ export default function Page() {
       const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
       
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image-preview',
+        model: 'gemini-2.5-flash-image',
         contents: {
           parts: [
             {
@@ -462,7 +479,7 @@ export default function Page() {
       const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
       
       const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image-preview',
+        model: 'gemini-2.5-flash-image',
         contents: {
           parts: [
             {
@@ -521,7 +538,7 @@ export default function Page() {
           </div>
           <h2 className="text-2xl font-bold mb-3 tracking-tight">API Key Required</h2>
           <p className="text-gray-500 mb-8 leading-relaxed text-sm">
-            This app uses the Gemini 3.1 Flash Image model for high-quality blending and background removal, which requires a paid Google Cloud project API key.
+            This app uses the Gemini 2.5 Flash Image model for fast, high-quality blending and background removal, which requires a paid Google Cloud project API key.
             <br/><br/>
             <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noreferrer" className="text-blue-600 hover:text-blue-700 font-medium hover:underline">Learn more about billing</a>
           </p>
@@ -658,7 +675,7 @@ export default function Page() {
             <Loader2 size={48} className="animate-spin text-blue-600 mb-4" />
             <h3 className="text-xl font-medium text-gray-900">Blending Elements...</h3>
             <p className="text-center text-gray-500 mt-2 max-w-sm">
-              Using Gemini 3.1 Flash Image to seamlessly blend elements into the background.
+              Using Gemini 2.5 Flash Image to seamlessly blend elements into the background.
             </p>
           </div>
         ) : generatedImage ? (
@@ -730,8 +747,8 @@ export default function Page() {
                           position: 'absolute',
                           top: 0,
                           left: 0,
-                          width: 150,
-                          height: 150,
+                          width: el.originalWidth || 150,
+                          height: el.originalHeight || 150,
                           transform: `translate(${el.x}px, ${el.y}px) scale(${el.scale})`,
                           transformOrigin: 'center',
                           zIndex: isSelected ? 50 : 10,
@@ -764,13 +781,22 @@ export default function Page() {
                 <span className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Scale</span>
                 <input 
                   type="range" 
-                  min="0.2" 
-                  max="4" 
-                  step="0.1" 
+                  min="0.1" 
+                  max="2" 
+                  step="0.01" 
                   value={canvasElements.find(e => e.canvasId === selectedElementId)?.scale || 1}
                   onChange={(e) => updateScale(selectedElementId, parseFloat(e.target.value))}
                   className="w-24 accent-gray-900"
                 />
+                <span className="text-sm font-medium text-gray-600 w-12 text-right">
+                  {Math.round((canvasElements.find(e => e.canvasId === selectedElementId)?.scale || 1) * 100)}%
+                </span>
+                <button
+                  onClick={() => updateScale(selectedElementId, 1)}
+                  className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-xs font-bold rounded-md transition-colors text-gray-700"
+                >
+                  100%
+                </button>
                 <div className="w-px h-6 bg-gray-200"></div>
                 <button 
                   onClick={() => removeBackground(selectedElementId)}
