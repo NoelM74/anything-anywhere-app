@@ -4,7 +4,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   Trash2, Download, Image as ImageIcon, Plus, Minus, Loader2, ArrowLeft,
   Settings2, Eraser, Maximize2, Minimize2, X, Menu,
-  RotateCcw, ChevronUp, ChevronDown, Type, Layers2, Copy,
+  RotateCcw, RotateCw, ChevronUp, ChevronDown, Type, Layers2, Copy,
 } from 'lucide-react';
 
 declare global {
@@ -96,25 +96,49 @@ function removeMagentaBackground(imageUrl: string): Promise<string> {
         self.onmessage = function(e) {
           var buf = e.data.buffer, width = e.data.width, height = e.data.height;
           var data = new Uint8ClampedArray(buf);
-          var isMagenta = function(r,g,b){ return r>200 && g<100 && b>200; };
+
+          // HSL-based magenta detection — catches pink, magenta, fuchsia, dark magenta etc.
+          function isMagenta(r, g, b) {
+            // Quick RGB pre-filter: need some color (not near-black), and green must be lower than red
+            if (r < 60 && b < 60) return false; // too dark to determine
+            if (r < 40) return false;
+            if (g > r * 0.75 && g > b * 0.75) return false; // green too dominant — not magenta
+            // Convert to HSL
+            var rn = r / 255, gn = g / 255, bn = b / 255;
+            var max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
+            var l = (max + min) / 2;
+            if (max === min) return false; // achromatic
+            var d = max - min;
+            var s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            if (s < 0.2) return false; // too desaturated
+            var h;
+            if (max === rn) h = ((gn - bn) / d + (gn < bn ? 6 : 0)) * 60;
+            else if (max === gn) h = ((bn - rn) / d + 2) * 60;
+            else h = ((rn - gn) / d + 4) * 60;
+            // Magenta/pink/fuchsia hue range: 270-360 and 0-15 degrees
+            return (h >= 270 && h <= 360) || (h >= 0 && h <= 15);
+          }
+
           var visited = new Uint8Array(width * height);
           var stack = [];
-          for (var x=0;x<width;x++){ stack.push(x,0); stack.push(x,height-1); }
-          for (var y=0;y<height;y++){ stack.push(0,y); stack.push(width-1,y); }
+          // Seed flood-fill from all edges
+          for (var x = 0; x < width; x++) { stack.push(x, 0); stack.push(x, height - 1); }
+          for (var y = 0; y < height; y++) { stack.push(0, y); stack.push(width - 1, y); }
           while (stack.length > 0) {
             var sy = stack.pop(), sx = stack.pop();
-            if (sx<0||sx>=width||sy<0||sy>=height) continue;
-            var vi = sy*width+sx;
+            if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+            var vi = sy * width + sx;
             if (visited[vi]) continue;
-            var i = vi*4;
-            if (isMagenta(data[i],data[i+1],data[i+2])) {
-              visited[vi]=1; data[i+3]=0;
-              stack.push(sx+1,sy); stack.push(sx-1,sy);
-              stack.push(sx,sy+1); stack.push(sx,sy-1);
+            var i = vi * 4;
+            if (isMagenta(data[i], data[i + 1], data[i + 2])) {
+              visited[vi] = 1; data[i + 3] = 0;
+              stack.push(sx + 1, sy); stack.push(sx - 1, sy);
+              stack.push(sx, sy + 1); stack.push(sx, sy - 1);
             }
           }
-          for (var j=0;j<data.length;j+=4) {
-            if (data[j]>240 && data[j+1]<20 && data[j+2]>240) data[j+3]=0;
+          // Cleanup pass: remove any remaining magenta-ish pixels anywhere
+          for (var j = 0; j < data.length; j += 4) {
+            if (isMagenta(data[j], data[j + 1], data[j + 2])) data[j + 3] = 0;
           }
           self.postMessage({ buffer: data.buffer }, [data.buffer]);
         };
@@ -362,8 +386,7 @@ export default function Page() {
   const [canvasElements, setCanvasElements] = useState<AnyCanvasElement[]>([]);
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
-  const [beforeImage, setBeforeImage] = useState<string | null>(null);
-  const [comparePos, setComparePos] = useState(50); // 0-100 slider position
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -458,31 +481,35 @@ export default function Page() {
   const handleElementsUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     e.target.value = ''; // reset so the same file can be re-selected
+    if (files.length === 0) return;
+
+    // Check capacity outside of updater to avoid React StrictMode double-invocation issues
     setElements(prev => {
       const currentCount = prev.length;
       if (currentCount >= 10) { addToast('Maximum of 10 elements reached.'); return prev; }
-      const availableSlots = 10 - currentCount;
-      const filesToProcess = files.slice(0, availableSlots);
-      if (files.length > availableSlots) {
-        addToast(`Only ${availableSlots} more element(s) can be added. Some files were skipped.`, 'info');
-      }
-      filesToProcess.forEach(file => {
-        if (file.size > 10 * 1024 * 1024) { addToast(`"${file.name}" is too large. Images must be under 10MB.`); return; }
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          const src = ev.target?.result as string;
-          const img = new Image();
-          img.onload = () => {
-            setElements(p => {
-              if (p.length >= 10) return p;
-              return [...p, { id: crypto.randomUUID(), src, brightness: 100, contrast: 100, originalWidth: img.naturalWidth, originalHeight: img.naturalHeight }];
-            });
-          };
-          img.src = src;
+      return prev; // just for the capacity check toast
+    });
+
+    const filesToProcess = files.slice(0, 10);
+    if (files.length > 10) {
+      addToast(`Only 10 elements allowed. Some files were skipped.`, 'info');
+    }
+
+    filesToProcess.forEach(file => {
+      if (file.size > 10 * 1024 * 1024) { addToast(`"${file.name}" is too large. Images must be under 10MB.`); return; }
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const src = ev.target?.result as string;
+        const img = new Image();
+        img.onload = () => {
+          setElements(p => {
+            if (p.length >= 10) return p;
+            return [...p, { id: crypto.randomUUID(), src, brightness: 100, contrast: 100, originalWidth: img.naturalWidth, originalHeight: img.naturalHeight }];
+          });
         };
-        reader.readAsDataURL(file);
-      });
-      return prev;
+        img.src = src;
+      };
+      reader.readAsDataURL(file);
     });
   }, [addToast]);
 
@@ -765,7 +792,7 @@ export default function Page() {
           setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, scale: Math.max(0.1, +(c.scale - 0.05).toFixed(2)) } : c));
         } else if (e.key === ']') {
           e.preventDefault();
-          setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, scale: Math.min(2, +(c.scale + 0.05).toFixed(2)) } : c));
+          setCanvasElements(prev => prev.map(c => c.canvasId === selId ? { ...c, scale: Math.min(3, +(c.scale + 0.05).toFixed(2)) } : c));
         } else if (e.key === ',') {
           // Rotate CCW by 5°
           e.preventDefault();
@@ -813,7 +840,6 @@ export default function Page() {
   const generateComposite = useCallback(async () => {
     if (!bgImgRef.current) return;
     setIsGenerating(true);
-    setComparePos(50);
     try {
       const zoom = canvasZoomRef.current;
       const bgRect = bgImgRef.current.getBoundingClientRect();
@@ -863,7 +889,6 @@ export default function Page() {
         ctx.restore();
       }
       const beforeDataUrl = canvas.toDataURL('image/jpeg', 0.9);
-      setBeforeImage(beforeDataUrl);
       // Resize to ≤ GEMINI_MAX_PX before sending — saves tokens on high-res images.
       const geminiDataUrl = await resizeForGemini(beforeDataUrl);
       const { data: base64Data } = parseDataUrl(geminiDataUrl);
@@ -1100,7 +1125,7 @@ export default function Page() {
         ) : generatedImage ? (
           <div className="flex-1 flex flex-col p-8 overflow-y-auto">
             <div className="flex items-center justify-between mb-6 shrink-0">
-              <button onClick={() => { setGeneratedImage(null); setBeforeImage(null); }} className="flex items-center gap-2 text-gray-600 hover:text-gray-900 font-medium transition-colors">
+              <button onClick={() => setGeneratedImage(null)} className="flex items-center gap-2 text-gray-600 hover:text-gray-900 font-medium transition-colors">
                 <ArrowLeft size={20} /> Back to Edit
               </button>
               <div className="flex items-center gap-3">
@@ -1113,49 +1138,6 @@ export default function Page() {
               </div>
             </div>
 
-            {/* Before/After comparison slider */}
-            {beforeImage && (
-              <div className="mb-4 shrink-0">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Before / After</span>
-                  <span className="text-xs text-gray-400">{comparePos}%</span>
-                </div>
-                <div
-                  className="relative w-full rounded-xl overflow-hidden select-none bg-gray-100"
-                  style={{ aspectRatio: '16/9', maxHeight: '50vh' }}
-                  onPointerMove={(e) => {
-                    if (e.buttons !== 1) return;
-                    const r = e.currentTarget.getBoundingClientRect();
-                    setComparePos(Math.round(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100))));
-                  }}
-                  onPointerDown={(e) => {
-                    e.currentTarget.setPointerCapture(e.pointerId);
-                    const r = e.currentTarget.getBoundingClientRect();
-                    setComparePos(Math.round(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100))));
-                  }}
-                >
-                  <img src={generatedImage} alt="After" className="absolute inset-0 w-full h-full object-contain" />
-                  <div
-                    className="absolute inset-0 overflow-hidden"
-                    style={{ clipPath: `inset(0 ${100 - comparePos}% 0 0)` }}
-                  >
-                    <img src={beforeImage} alt="Before" className="absolute inset-0 w-full h-full object-contain" />
-                  </div>
-                  {/* Divider */}
-                  <div
-                    className="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg pointer-events-none"
-                    style={{ left: `${comparePos}%` }}
-                  >
-                    <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-white shadow-md flex items-center justify-center">
-                      <div className="w-3 h-3 rounded-full bg-gray-400" />
-                    </div>
-                  </div>
-                  {/* Labels */}
-                  <span className="absolute top-2 left-3 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">BEFORE</span>
-                  <span className="absolute top-2 right-3 text-[10px] font-bold text-white bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">AFTER</span>
-                </div>
-              </div>
-            )}
 
             <div className="flex-1 bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex items-center justify-center p-4 min-h-0">
               <img src={generatedImage} alt="Generated" className="max-w-full max-h-full object-contain rounded-lg" />
@@ -1232,71 +1214,119 @@ export default function Page() {
 
             {/* Floating toolbar for selected element */}
             {selectedElementId && selectedCanvasEl && (
-              <div className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md rounded-2xl shadow-xl px-5 py-3 flex items-center gap-3 z-50 border border-gray-200 flex-wrap justify-center max-w-[96vw]">
-                {/* Scale */}
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Scale</span>
-                <input
-                  type="range" min="0.1" max="2" step="0.01"
-                  value={selectedCanvasEl.scale}
-                  onChange={(e) => updateScale(selectedElementId, parseFloat(e.target.value))}
-                  className="w-20 accent-gray-900"
-                />
-                <span className="text-xs font-medium text-gray-600 w-10 text-right tabular-nums">
-                  {Math.round(selectedCanvasEl.scale * 100)}%
-                </span>
-                <button
-                  onClick={() => updateScale(selectedElementId, 1)}
-                  className="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-xs font-bold rounded transition-colors text-gray-700"
-                >1:1</button>
+              <div className="absolute bottom-20 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md rounded-2xl shadow-xl z-50 border border-gray-200 max-w-[96vw] w-[420px]">
+                <div className="p-3 space-y-2.5">
+                  {/* Scale row */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest w-12 shrink-0">Scale</span>
+                    <button
+                      onClick={() => updateScale(selectedElementId, Math.max(0.1, +(selectedCanvasEl.scale - 0.1).toFixed(2)))}
+                      className="w-9 h-9 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors shrink-0 active:scale-95"
+                      aria-label="Scale down"
+                    >
+                      <Minus size={16} />
+                    </button>
+                    <input
+                      type="number" min="10" max="300" step="10"
+                      value={Math.round(selectedCanvasEl.scale * 100)}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v)) updateScale(selectedElementId, Math.max(0.1, Math.min(3, v / 100)));
+                      }}
+                      className="w-16 h-9 text-center text-sm font-semibold bg-gray-50 border border-gray-200 rounded-lg tabular-nums focus:outline-none focus:ring-2 focus:ring-gray-900 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <span className="text-xs text-gray-400 -ml-1">%</span>
+                    <button
+                      onClick={() => updateScale(selectedElementId, Math.min(3, +(selectedCanvasEl.scale + 0.1).toFixed(2)))}
+                      className="w-9 h-9 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors shrink-0 active:scale-95"
+                      aria-label="Scale up"
+                    >
+                      <Plus size={16} />
+                    </button>
+                    <div className="flex gap-1 ml-auto flex-wrap">
+                      {[50, 75, 100, 150, 200].map(p => (
+                        <button
+                          key={p}
+                          onClick={() => updateScale(selectedElementId, p / 100)}
+                          className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                            Math.round(selectedCanvasEl.scale * 100) === p
+                              ? 'bg-gray-900 text-white'
+                              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}
+                        >{p}%</button>
+                      ))}
+                    </div>
+                  </div>
 
-                <div className="w-px h-5 bg-gray-200" />
+                  {/* Rotation row */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest w-12 shrink-0">Rotate</span>
+                    <button
+                      onClick={() => updateRotation(selectedElementId, (selectedCanvasEl.rotation - 15 + 360) % 360)}
+                      className="w-9 h-9 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors shrink-0 active:scale-95"
+                      aria-label="Rotate counter-clockwise"
+                    >
+                      <RotateCcw size={16} />
+                    </button>
+                    <input
+                      type="number" min="0" max="359" step="15"
+                      value={Math.round(selectedCanvasEl.rotation)}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        if (!isNaN(v)) updateRotation(selectedElementId, ((v % 360) + 360) % 360);
+                      }}
+                      className="w-16 h-9 text-center text-sm font-semibold bg-gray-50 border border-gray-200 rounded-lg tabular-nums focus:outline-none focus:ring-2 focus:ring-gray-900 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <span className="text-xs text-gray-400 -ml-1">°</span>
+                    <button
+                      onClick={() => updateRotation(selectedElementId, (selectedCanvasEl.rotation + 15) % 360)}
+                      className="w-9 h-9 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors shrink-0 active:scale-95"
+                      aria-label="Rotate clockwise"
+                    >
+                      <RotateCw size={16} />
+                    </button>
+                    <div className="flex gap-1 ml-auto flex-wrap">
+                      {[0, 90, 180, 270].map(d => (
+                        <button
+                          key={d}
+                          onClick={() => updateRotation(selectedElementId, d)}
+                          className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                            Math.round(selectedCanvasEl.rotation) === d
+                              ? 'bg-gray-900 text-white'
+                              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}
+                        >{d}°</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
 
-                {/* Rotation */}
-                <RotateCcw size={14} className="text-gray-500" />
-                <input
-                  type="range" min="0" max="359" step="1"
-                  value={selectedCanvasEl.rotation}
-                  onChange={(e) => updateRotation(selectedElementId, parseInt(e.target.value, 10))}
-                  className="w-20 accent-gray-900"
-                />
-                <span className="text-xs font-medium text-gray-600 w-8 text-right tabular-nums">
-                  {Math.round(selectedCanvasEl.rotation)}°
-                </span>
-                <button
-                  onClick={() => updateRotation(selectedElementId, 0)}
-                  className="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-xs font-bold rounded transition-colors text-gray-700"
-                >0°</button>
-
-                <div className="w-px h-5 bg-gray-200" />
-
-                {selectedCanvasEl.kind === 'image' && (
-                  <>
+                {/* Action buttons row */}
+                <div className="flex items-center justify-center gap-1 px-3 pb-3 pt-0.5">
+                  {selectedCanvasEl.kind === 'image' && (
                     <button
                       onClick={() => removeBackground(selectedElementId)}
                       disabled={selectedCanvasEl.isRemovingBackground}
-                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
                     >
                       <Eraser size={14} /> Remove BG
                     </button>
-                    <div className="w-px h-5 bg-gray-200" />
-                  </>
-                )}
-
-                <button
-                  onClick={() => duplicateElement(selectedElementId)}
-                  className="text-gray-600 hover:text-gray-900 hover:bg-gray-100 p-1.5 rounded-full transition-colors"
-                  title="Duplicate element"
-                >
-                  <Copy size={16} />
-                </button>
-
-                <button
-                  onClick={() => removeCanvasElement(selectedElementId)}
-                  className="text-red-500 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-full transition-colors"
-                  title="Remove element (Del)"
-                >
-                  <Trash2 size={16} />
-                </button>
+                  )}
+                  <button
+                    onClick={() => duplicateElement(selectedElementId)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
+                    title="Duplicate element"
+                  >
+                    <Copy size={14} /> Copy
+                  </button>
+                  <button
+                    onClick={() => removeCanvasElement(selectedElementId)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-red-500 hover:text-red-600 hover:bg-red-50 transition-colors"
+                    title="Remove element (Del)"
+                  >
+                    <Trash2 size={14} /> Delete
+                  </button>
+                </div>
               </div>
             )}
 
