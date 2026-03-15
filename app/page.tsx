@@ -4,7 +4,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   Trash2, Download, Image as ImageIcon, Plus, Minus, Loader2, ArrowLeft,
   Settings2, Eraser, Maximize2, Minimize2, X, Menu,
-  RotateCcw, ChevronUp, ChevronDown, Type, Layers2,
+  RotateCcw, ChevronUp, ChevronDown, Type, Layers2, Copy,
 } from 'lucide-react';
 
 declare global {
@@ -134,6 +134,33 @@ function removeMagentaBackground(imageUrl: string): Promise<string> {
     };
     img.onerror = reject;
     img.src = imageUrl;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Image resize helper — keeps Gemini input ≤ GEMINI_MAX_PX on longest side.
+// Dramatically reduces token consumption for high-resolution source images.
+// ---------------------------------------------------------------------------
+
+const GEMINI_MAX_PX = 1024;
+
+function resizeForGemini(dataUrl: string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const { naturalWidth: w, naturalHeight: h } = img;
+      if (w <= GEMINI_MAX_PX && h <= GEMINI_MAX_PX) { resolve(dataUrl); return; }
+      const scale = GEMINI_MAX_PX / Math.max(w, h);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(dataUrl); return; }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.88));
+    };
+    img.onerror = () => resolve(dataUrl); // fall back to original on error
+    img.src = dataUrl;
   });
 }
 
@@ -420,6 +447,7 @@ export default function Page() {
 
   const handleBackgroundUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = ''; // reset so the same file can be re-selected
     if (!file) return;
     if (file.size > 10 * 1024 * 1024) { addToast('Background image must be smaller than 10MB.'); return; }
     const reader = new FileReader();
@@ -429,6 +457,7 @@ export default function Page() {
 
   const handleElementsUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
+    e.target.value = ''; // reset so the same file can be re-selected
     setElements(prev => {
       const currentCount = prev.length;
       if (currentCount >= 10) { addToast('Maximum of 10 elements reached.'); return prev; }
@@ -477,7 +506,8 @@ export default function Page() {
     if (!el) return;
     setElements(prev => prev.map(e => e.id === id ? { ...e, isRemovingBackground: true } : e));
     try {
-      const { data: base64Data, mimeType } = parseDataUrl(el.src);
+      const resized = await resizeForGemini(el.src);
+      const { data: base64Data, mimeType } = parseDataUrl(resized);
       const magentaImageUrl = await callGemini(base64Data, mimeType,
         'Extract the main subject of the image and place it on a pure, solid magenta background (Hex: #FF00FF). CRITICAL: DO NOT use a checkerboard or grid pattern. The background must be completely solid magenta.',
       );
@@ -573,6 +603,14 @@ export default function Page() {
     setSelectedElementId(prev => prev === canvasId ? null : prev);
   }, []);
 
+  const duplicateElement = useCallback((canvasId: string) => {
+    const el = canvasElementsRef.current.find(e => e.canvasId === canvasId);
+    if (!el) return;
+    const newEl = { ...el, canvasId: crypto.randomUUID(), x: el.x + 20, y: el.y + 20 };
+    setCanvasElements(prev => [...prev, newEl]);
+    setSelectedElementId(newEl.canvasId);
+  }, []);
+
   const handlePointerDown = useCallback((e: React.PointerEvent, canvasId: string) => {
     e.stopPropagation();
     e.preventDefault();
@@ -608,16 +646,20 @@ export default function Page() {
         const elRect = elNode.getBoundingClientRect();
         const width = elRect.width;
         const height = elRect.height;
+        const zoom = canvasZoomRef.current;
         const SNAP_THRESHOLD = 15;
+        // Guide positions must be in CSS px (inside the zoom-scaled wrapper),
+        // so divide all screen-px values by zoom before storing.
+        const spx = (v: number) => v / zoom;
         const guides: { type: 'vertical' | 'horizontal'; position: number }[] = [];
 
         if (Math.abs(newScaledX) < SNAP_THRESHOLD) { newScaledX = 0; guides.push({ type: 'vertical', position: 0 }); }
-        else if (Math.abs(newScaledX + width - bgRect.width) < SNAP_THRESHOLD) { newScaledX = bgRect.width - width; guides.push({ type: 'vertical', position: bgRect.width }); }
-        else if (Math.abs(newScaledX + width / 2 - bgRect.width / 2) < SNAP_THRESHOLD) { newScaledX = bgRect.width / 2 - width / 2; guides.push({ type: 'vertical', position: bgRect.width / 2 }); }
+        else if (Math.abs(newScaledX + width - bgRect.width) < SNAP_THRESHOLD) { newScaledX = bgRect.width - width; guides.push({ type: 'vertical', position: spx(bgRect.width) }); }
+        else if (Math.abs(newScaledX + width / 2 - bgRect.width / 2) < SNAP_THRESHOLD) { newScaledX = bgRect.width / 2 - width / 2; guides.push({ type: 'vertical', position: spx(bgRect.width / 2) }); }
 
         if (Math.abs(newScaledY) < SNAP_THRESHOLD) { newScaledY = 0; guides.push({ type: 'horizontal', position: 0 }); }
-        else if (Math.abs(newScaledY + height - bgRect.height) < SNAP_THRESHOLD) { newScaledY = bgRect.height - height; guides.push({ type: 'horizontal', position: bgRect.height }); }
-        else if (Math.abs(newScaledY + height / 2 - bgRect.height / 2) < SNAP_THRESHOLD) { newScaledY = bgRect.height / 2 - height / 2; guides.push({ type: 'horizontal', position: bgRect.height / 2 }); }
+        else if (Math.abs(newScaledY + height - bgRect.height) < SNAP_THRESHOLD) { newScaledY = bgRect.height - height; guides.push({ type: 'horizontal', position: spx(bgRect.height) }); }
+        else if (Math.abs(newScaledY + height / 2 - bgRect.height / 2) < SNAP_THRESHOLD) { newScaledY = bgRect.height / 2 - height / 2; guides.push({ type: 'horizontal', position: spx(bgRect.height / 2) }); }
 
         canvasElementsRef.current.forEach(otherEl => {
           if (otherEl.canvasId === draggingId) return;
@@ -625,16 +667,16 @@ export default function Page() {
           if (!otherNode) return;
           const or = otherNode.getBoundingClientRect();
           const ox = or.left - bgRect.left, oy = or.top - bgRect.top, ow = or.width, oh = or.height;
-          if (Math.abs(newScaledX - ox) < SNAP_THRESHOLD) { newScaledX = ox; guides.push({ type: 'vertical', position: ox }); }
-          else if (Math.abs((newScaledX + width) - (ox + ow)) < SNAP_THRESHOLD) { newScaledX = ox + ow - width; guides.push({ type: 'vertical', position: ox + ow }); }
-          else if (Math.abs((newScaledX + width / 2) - (ox + ow / 2)) < SNAP_THRESHOLD) { newScaledX = ox + ow / 2 - width / 2; guides.push({ type: 'vertical', position: ox + ow / 2 }); }
-          else if (Math.abs(newScaledX - (ox + ow)) < SNAP_THRESHOLD) { newScaledX = ox + ow; guides.push({ type: 'vertical', position: ox + ow }); }
-          else if (Math.abs((newScaledX + width) - ox) < SNAP_THRESHOLD) { newScaledX = ox - width; guides.push({ type: 'vertical', position: ox }); }
-          if (Math.abs(newScaledY - oy) < SNAP_THRESHOLD) { newScaledY = oy; guides.push({ type: 'horizontal', position: oy }); }
-          else if (Math.abs((newScaledY + height) - (oy + oh)) < SNAP_THRESHOLD) { newScaledY = oy + oh - height; guides.push({ type: 'horizontal', position: oy + oh }); }
-          else if (Math.abs((newScaledY + height / 2) - (oy + oh / 2)) < SNAP_THRESHOLD) { newScaledY = oy + oh / 2 - height / 2; guides.push({ type: 'horizontal', position: oy + oh / 2 }); }
-          else if (Math.abs(newScaledY - (oy + oh)) < SNAP_THRESHOLD) { newScaledY = oy + oh; guides.push({ type: 'horizontal', position: oy + oh }); }
-          else if (Math.abs((newScaledY + height) - oy) < SNAP_THRESHOLD) { newScaledY = oy - height; guides.push({ type: 'horizontal', position: oy }); }
+          if (Math.abs(newScaledX - ox) < SNAP_THRESHOLD) { newScaledX = ox; guides.push({ type: 'vertical', position: spx(ox) }); }
+          else if (Math.abs((newScaledX + width) - (ox + ow)) < SNAP_THRESHOLD) { newScaledX = ox + ow - width; guides.push({ type: 'vertical', position: spx(ox + ow) }); }
+          else if (Math.abs((newScaledX + width / 2) - (ox + ow / 2)) < SNAP_THRESHOLD) { newScaledX = ox + ow / 2 - width / 2; guides.push({ type: 'vertical', position: spx(ox + ow / 2) }); }
+          else if (Math.abs(newScaledX - (ox + ow)) < SNAP_THRESHOLD) { newScaledX = ox + ow; guides.push({ type: 'vertical', position: spx(ox + ow) }); }
+          else if (Math.abs((newScaledX + width) - ox) < SNAP_THRESHOLD) { newScaledX = ox - width; guides.push({ type: 'vertical', position: spx(ox) }); }
+          if (Math.abs(newScaledY - oy) < SNAP_THRESHOLD) { newScaledY = oy; guides.push({ type: 'horizontal', position: spx(oy) }); }
+          else if (Math.abs((newScaledY + height) - (oy + oh)) < SNAP_THRESHOLD) { newScaledY = oy + oh - height; guides.push({ type: 'horizontal', position: spx(oy + oh) }); }
+          else if (Math.abs((newScaledY + height / 2) - (oy + oh / 2)) < SNAP_THRESHOLD) { newScaledY = oy + oh / 2 - height / 2; guides.push({ type: 'horizontal', position: spx(oy + oh / 2) }); }
+          else if (Math.abs(newScaledY - (oy + oh)) < SNAP_THRESHOLD) { newScaledY = oy + oh; guides.push({ type: 'horizontal', position: spx(oy + oh) }); }
+          else if (Math.abs((newScaledY + height) - oy) < SNAP_THRESHOLD) { newScaledY = oy - height; guides.push({ type: 'horizontal', position: spx(oy) }); }
         });
 
         setSnapGuides(guides);
@@ -643,7 +685,6 @@ export default function Page() {
         const baseW = (dragged?.kind === 'image' ? dragged.originalWidth : undefined) || 150;
         const baseH = (dragged?.kind === 'image' ? dragged.originalHeight : undefined) || 150;
         // Convert screen px → CSS px (the coordinate space of el.x/y), accounting for zoom.
-        const zoom = canvasZoomRef.current;
         const unscaledX = newScaledX / zoom - (baseW - width / zoom) / 2;
         const unscaledY = newScaledY / zoom - (baseH - height / zoom) / 2;
 
@@ -756,7 +797,8 @@ export default function Page() {
     if (!el || el.kind !== 'image') return;
     setCanvasElements(prev => prev.map(e => e.canvasId === canvasId ? { ...e, isRemovingBackground: true } : e));
     try {
-      const { data: base64Data, mimeType } = parseDataUrl(el.src);
+      const resized = await resizeForGemini(el.src);
+      const { data: base64Data, mimeType } = parseDataUrl(resized);
       const newImageUrl = await callGemini(base64Data, mimeType,
         'Extract the main subject of the image and remove the background. Output the result as a PNG image with a TRUE transparent background (alpha channel = 0). CRITICAL: DO NOT output a checkerboard or grid pattern. The background must be completely clear and transparent.',
       );
@@ -822,7 +864,9 @@ export default function Page() {
       }
       const beforeDataUrl = canvas.toDataURL('image/jpeg', 0.9);
       setBeforeImage(beforeDataUrl);
-      const { data: base64Data } = parseDataUrl(beforeDataUrl);
+      // Resize to ≤ GEMINI_MAX_PX before sending — saves tokens on high-res images.
+      const geminiDataUrl = await resizeForGemini(beforeDataUrl);
+      const { data: base64Data } = parseDataUrl(geminiDataUrl);
       const newImageUrl = await callGemini(base64Data, 'image/jpeg',
         'This image contains a background and several elements overlaid on top of it. Please blend the overlaid elements naturally into the background. CRITICAL INSTRUCTIONS: 1. DO NOT change the original background image in any way (do not turn on lights, do not change the time of day, do not alter the room). 2. DO NOT change the appearance, color, or texture of the elements being added. 3. DO NOT project shadows or light patterns onto the elements (e.g., do not add window shadows across the sofa). 4. Only add subtle contact shadows underneath or behind the elements to ground them in the scene. 5. The final image must look exactly like the layout image, but with realistic contact shadows.',
       );
@@ -839,34 +883,22 @@ export default function Page() {
     if (!generatedImage) return;
     const format = fmt ?? exportFormat;
     const q = (quality ?? exportQuality) / 100;
-    if (format === 'jpeg') {
-      // Re-encode at requested quality
-      const img = new Image();
-      img.onload = () => {
-        const c = document.createElement('canvas');
-        c.width = img.naturalWidth; c.height = img.naturalHeight;
-        c.getContext('2d')!.drawImage(img, 0, 0);
-        const a = document.createElement('a');
-        a.href = c.toDataURL('image/jpeg', q);
-        a.download = 'blended-image.jpg';
-        a.click();
-      };
-      img.src = generatedImage;
-    } else {
-      const img = new Image();
-      img.onload = () => {
-        const c = document.createElement('canvas');
-        c.width = img.naturalWidth; c.height = img.naturalHeight;
-        c.getContext('2d')!.drawImage(img, 0, 0);
-        const a = document.createElement('a');
-        a.href = c.toDataURL('image/png');
-        a.download = 'blended-image.png';
-        a.click();
-      };
-      img.src = generatedImage;
-    }
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const ctx = c.getContext('2d');
+      if (!ctx) { addToast('Could not prepare image for download.'); return; }
+      ctx.drawImage(img, 0, 0);
+      const a = document.createElement('a');
+      a.href = format === 'jpeg' ? c.toDataURL('image/jpeg', q) : c.toDataURL('image/png');
+      a.download = format === 'jpeg' ? 'blended-image.jpg' : 'blended-image.png';
+      a.click();
+    };
+    img.onerror = () => addToast('Failed to load image for export.');
+    img.src = generatedImage;
     setShowExportModal(false);
-  }, [generatedImage, exportFormat, exportQuality]);
+  }, [generatedImage, exportFormat, exportQuality, addToast]);
 
   const handleEditElement = useCallback((id: string) => setEditingElementId(id), []);
   const handleDragStart = useCallback((e: React.DragEvent, id: string) => {
@@ -1224,7 +1256,7 @@ export default function Page() {
                 <input
                   type="range" min="0" max="359" step="1"
                   value={selectedCanvasEl.rotation}
-                  onChange={(e) => updateRotation(selectedElementId, parseInt(e.target.value))}
+                  onChange={(e) => updateRotation(selectedElementId, parseInt(e.target.value, 10))}
                   className="w-20 accent-gray-900"
                 />
                 <span className="text-xs font-medium text-gray-600 w-8 text-right tabular-nums">
@@ -1249,6 +1281,14 @@ export default function Page() {
                     <div className="w-px h-5 bg-gray-200" />
                   </>
                 )}
+
+                <button
+                  onClick={() => duplicateElement(selectedElementId)}
+                  className="text-gray-600 hover:text-gray-900 hover:bg-gray-100 p-1.5 rounded-full transition-colors"
+                  title="Duplicate element"
+                >
+                  <Copy size={16} />
+                </button>
 
                 <button
                   onClick={() => removeCanvasElement(selectedElementId)}
@@ -1325,7 +1365,7 @@ export default function Page() {
                   <span className="text-sm text-gray-500">{editingElement.brightness}%</span>
                 </div>
                 <input type="range" min="0" max="200" value={editingElement.brightness}
-                  onChange={(e) => updateElementFilter(editingElement.id, 'brightness', parseInt(e.target.value))}
+                  onChange={(e) => updateElementFilter(editingElement.id, 'brightness', parseInt(e.target.value, 10))}
                   className="w-full accent-gray-900" />
               </div>
               <div>
@@ -1334,7 +1374,7 @@ export default function Page() {
                   <span className="text-sm text-gray-500">{editingElement.contrast}%</span>
                 </div>
                 <input type="range" min="0" max="200" value={editingElement.contrast}
-                  onChange={(e) => updateElementFilter(editingElement.id, 'contrast', parseInt(e.target.value))}
+                  onChange={(e) => updateElementFilter(editingElement.id, 'contrast', parseInt(e.target.value, 10))}
                   className="w-full accent-gray-900" />
               </div>
             </div>
@@ -1388,7 +1428,7 @@ export default function Page() {
                   </div>
                   <input type="range" min="10" max="100" step="1"
                     value={exportQuality}
-                    onChange={(e) => setExportQuality(parseInt(e.target.value))}
+                    onChange={(e) => setExportQuality(parseInt(e.target.value, 10))}
                     className="w-full accent-gray-900" />
                   <div className="flex justify-between text-xs text-gray-400 mt-1">
                     <span>Smaller file</span><span>Best quality</span>
@@ -1439,7 +1479,7 @@ export default function Page() {
                 <div>
                   <label className="text-xs font-semibold text-gray-500 mb-1 block">Font Size</label>
                   <input type="number" min="8" max="300" value={textFontSize}
-                    onChange={(e) => setTextFontSize(parseInt(e.target.value) || 48)}
+                    onChange={(e) => setTextFontSize(parseInt(e.target.value, 10) || 48)}
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900" />
                 </div>
                 <div>
